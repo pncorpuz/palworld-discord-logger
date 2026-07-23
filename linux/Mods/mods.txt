@@ -1,0 +1,2 @@
+PlayerJoinLogger : 1
+BaseInventoryLogger : 1
