@@ -1,0 +1,5 @@
+{
+  "poll_interval_seconds": 10,
+  "discord_enabled": false,
+  "discord_webhook_url": ""
+}
