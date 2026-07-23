@@ -1,4 +1,4 @@
 Mods/BaseInventoryLogger/Scripts/config.json
-Mods/BaseInventoryLogger/Scripts/discord_message_id.txt
+Mods/BaseInventoryLogger/Scripts/discord_message_id_*.txt
 Mods/BaseInventoryLogger/Scripts/discord_payload.tmp.json
 Mods/BaseInventoryLogger/Scripts/discord_response.tmp.json

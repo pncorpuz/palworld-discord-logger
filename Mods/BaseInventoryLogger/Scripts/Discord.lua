@@ -11,10 +11,12 @@
 -- Edit-in-place mechanics: Discord's webhook execute endpoint (POST) only
 -- returns the created message's JSON (with its id) if called with
 -- `?wait=true` -- otherwise it's fire-and-forget (204, no body). The id is
--- persisted to a small state file so later ticks can PATCH
--- /webhooks/{id}/{token}/messages/{message_id} instead of POSTing a new
--- message. No extra auth needed for the PATCH beyond the webhook token
--- that's already embedded in the URL, since it's editing its own message.
+-- persisted to a small state file, ONE PER WEBHOOK (named by the webhook's
+-- own id, since multiple webhooks are now in play with per-guild routing),
+-- so later ticks can PATCH /webhooks/{id}/{token}/messages/{message_id}
+-- instead of POSTing a new message each time. No extra auth needed for the
+-- PATCH beyond the webhook token already embedded in the URL, since it's
+-- editing its own message.
 --
 -- All request/response bodies go through temp files rather than inline on
 -- the command line, to avoid cmd.exe's quoting rules mangling embedded
@@ -31,22 +33,25 @@ local Discord = {}
 local SCRIPTS_DIR = "ue4ss/Mods/BaseInventoryLogger/Scripts/"
 local PAYLOAD_PATH = SCRIPTS_DIR .. "discord_payload.tmp.json"
 local RESPONSE_PATH = SCRIPTS_DIR .. "discord_response.tmp.json"
-local MESSAGE_ID_PATH = SCRIPTS_DIR .. "discord_message_id.txt"
 
 local MAX_CONTENT_LENGTH = 1900   -- Discord content hard limit is 2000
 local MAX_FIELD_VALUE_LENGTH = 1024 -- Discord embed field value hard limit
 local MAX_FIELDS = 25             -- Discord embed field count hard limit
 
-local function ReadMessageId()
-    local f = io.open(MESSAGE_ID_PATH, "r")
+local function MessageIdPath(webhookId)
+    return SCRIPTS_DIR .. "discord_message_id_" .. tostring(webhookId) .. ".txt"
+end
+
+local function ReadMessageId(webhookId)
+    local f = io.open(MessageIdPath(webhookId), "r")
     if not f then return nil end
     local text = f:read("*a")
     f:close()
     return text and text:match("%d+")
 end
 
-local function WriteMessageId(id)
-    local f = io.open(MESSAGE_ID_PATH, "w")
+local function WriteMessageId(webhookId, id)
+    local f = io.open(MessageIdPath(webhookId), "w")
     if not f then return end
     f:write(id)
     f:close()
@@ -97,9 +102,9 @@ local function SendPayload(webhookUrl, jsonBody)
     file:close()
 
     local webhookId, webhookToken = ParseWebhookUrl(webhookUrl)
-    local existingMessageId = ReadMessageId()
+    local existingMessageId = webhookId and ReadMessageId(webhookId)
 
-    if existingMessageId and webhookId and webhookToken then
+    if existingMessageId and webhookToken then
         local editUrl = string.format("https://discord.com/api/webhooks/%s/%s/messages/%s",
             webhookId, webhookToken, existingMessageId)
         local status = RunCurl("PATCH", editUrl, PAYLOAD_PATH)
@@ -116,7 +121,7 @@ local function SendPayload(webhookUrl, jsonBody)
 
     if status and status < 300 then
         local newId = responseBody and responseBody:match('"id"%s*:%s*"(%d+)"')
-        if newId then WriteMessageId(newId) end
+        if newId and webhookId then WriteMessageId(webhookId, newId) end
         return true, "posted new message (" .. tostring(status) .. ")"
     end
 

@@ -54,10 +54,13 @@ local PAL_DISPLAY_NAMES = require("PalNames")
 local config = require("Config")
 local Discord = require("Discord")
 
-print(string.format(
-    "[BaseInventoryLogger] Config loaded: poll_interval_seconds=%s, discord_enabled=%s, discord_webhook_url=%s\n",
-    tostring(config.poll_interval_seconds), tostring(config.discord_enabled),
-    (config.discord_webhook_url ~= "" and "<set>" or "<empty>")))
+do
+    local webhookCount = 0
+    for _ in pairs(config.guild_webhooks) do webhookCount = webhookCount + 1 end
+    print(string.format(
+        "[BaseInventoryLogger] Config loaded: poll_interval_seconds=%s, discord_enabled=%s, guild_webhooks configured=%d\n",
+        tostring(config.poll_interval_seconds), tostring(config.discord_enabled), webhookCount))
+end
 
 -- Verbatim from CXXHeaderDump/Pal_enums.hpp -- EPalStatusPhysicalHealthType
 local PHYSICAL_HEALTH_NAMES = {
@@ -219,32 +222,36 @@ local function FormatPalLineForDiscord(nick, speciesName, level, v)
         nameLabel, tostring(level), hpText, stomachText, sanityText, v.taskName, badgeText)
 end
 
--- discordFields, if given, has one entry appended per base: { name, value }.
-local function LogBaseCamp(base, baseLabel, guildName, discordFields)
-    if not isValid(base) then return end
+-- Always prints to console. If wantDiscordFields is true, ALSO returns a
+-- list of {name, value} field chunks for this base (nil if unavailable) --
+-- returned rather than appended to a shared table, so the caller can
+-- distribute copies to multiple destination embeds (per-guild + "all")
+-- without re-running the base/pal fetch or printing to console twice.
+local function LogBaseCamp(base, baseLabel, guildName, wantDiscordFields)
+    if not isValid(base) then return nil end
 
     local director = base.WorkerDirector
     if not isValid(director) then
         print(string.format("    %s: no valid WorkerDirector\n", baseLabel))
-        return
+        return nil
     end
 
     local container = director.CharacterContainer
     if not isValid(container) then
         print(string.format("    %s: no valid CharacterContainer\n", baseLabel))
-        return
+        return nil
     end
 
     local okNum, count = pcall(function() return container:Num() end)
     if not okNum or not count then
         print(string.format("    %s: could not read slot count\n", baseLabel))
-        return
+        return nil
     end
     count = math.min(count, MAX_SLOTS_SAFETY_CAP)
 
     print(string.format("    %s (%d slot(s)):\n", baseLabel, count))
 
-    local discordPalLines = discordFields and {}
+    local discordPalLines = wantDiscordFields and {}
 
     for i = 0, count - 1 do
         local okSlot, slot = pcall(function() return container:Get(i) end)
@@ -285,44 +292,64 @@ local function LogBaseCamp(base, baseLabel, guildName, discordFields)
         end
     end
 
-    if discordFields and discordPalLines and #discordPalLines > 0 then
-        -- Greedily pack lines into a field until the next one would push it
-        -- over the soft limit, then start a new "(cont.)" field. Handles a
-        -- 20-Pal base without truncating data or needing real pagination.
-        local chunkLines = {}
-        local chunkLength = 0
-        local chunkIndex = 1
+    if not (wantDiscordFields and discordPalLines and #discordPalLines > 0) then
+        return nil
+    end
 
-        local function FlushChunk()
-            if #chunkLines == 0 then return end
-            local suffix = (chunkIndex > 1) and string.format(" (cont. %d)", chunkIndex) or ""
-            table.insert(discordFields, {
-                name = string.format("🏰 %s — %s%s", guildName, baseLabel, suffix),
-                value = table.concat(chunkLines, "\n"),
-                inline = false,
-            })
-            chunkLines = {}
-            chunkLength = 0
-            chunkIndex = chunkIndex + 1
-        end
+    -- Greedily pack lines into a field until the next one would push it
+    -- over the soft limit, then start a new "(cont.)" field. Handles a
+    -- 20-Pal base without truncating data or needing real pagination.
+    local fields = {}
+    local chunkLines = {}
+    local chunkLength = 0
+    local chunkIndex = 1
 
-        for _, line in ipairs(discordPalLines) do
-            if chunkLength + #line + 1 > DISCORD_FIELD_VALUE_SOFT_LIMIT then
-                FlushChunk()
-            end
-            table.insert(chunkLines, line)
-            chunkLength = chunkLength + #line + 1
+    local function FlushChunk()
+        if #chunkLines == 0 then return end
+        local suffix = (chunkIndex > 1) and string.format(" (cont. %d)", chunkIndex) or ""
+        table.insert(fields, {
+            name = string.format("🏰 %s — %s%s", guildName, baseLabel, suffix),
+            value = table.concat(chunkLines, "\n"),
+            inline = false,
+        })
+        chunkLines = {}
+        chunkLength = 0
+        chunkIndex = chunkIndex + 1
+    end
+
+    for _, line in ipairs(discordPalLines) do
+        if chunkLength + #line + 1 > DISCORD_FIELD_VALUE_SOFT_LIMIT then
+            FlushChunk()
         end
-        FlushChunk()
+        table.insert(chunkLines, line)
+        chunkLength = chunkLength + #line + 1
+    end
+    FlushChunk()
+
+    return fields
+end
+
+-- Sends one embed (all accumulated fields) to one webhook, if that webhook
+-- is actually configured and there's anything to say.
+local function SendGuildReport(title, webhookUrl, fields, guildCount, baseCount)
+    if not webhookUrl or webhookUrl == "" or #fields == 0 then return end
+
+    local embed = {
+        title = title,
+        description = string.format("%d guild(s), %d base(s)", guildCount, baseCount),
+        color = 0x57F287, -- Discord green
+        fields = fields,
+        footer = "BaseInventoryLogger",
+        timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    }
+    local ok, statusOrErr = Discord.SendEmbed(webhookUrl, embed)
+    if not ok then
+        print(string.format("[BaseInventoryLogger] Discord send failed (%s): %s\n", title, tostring(statusOrErr)))
     end
 end
 
 LoopAsync(config.poll_interval_seconds * 1000, function()
     local bases = FindAllOf("PalBaseCampModel")
-
-    -- Only built/used when discord_enabled, so a Discord failure or a webhook
-    -- misconfiguration can never affect the console log either way.
-    local discordFields = config.discord_enabled and {} or nil
 
     if not bases or #bases == 0 then
         print("[BaseInventoryLogger] No bases found on map\n")
@@ -347,27 +374,41 @@ LoopAsync(config.poll_interval_seconds * 1000, function()
         end
     end
 
+    -- "all" is a reserved key in guild_webhooks for an admin webhook that
+    -- gets every guild's fields combined into one report.
+    local adminWebhook = config.guild_webhooks["all"]
+    local allFields = adminWebhook and {} or nil
+    local perGuildFields = {} -- guildName -> field list, only for guilds with a configured webhook
+
     print(string.format("[BaseInventoryLogger] --- Tick: %d guild(s), %d base(s) ---\n", #guildOrder, #bases))
     for _, guildName in ipairs(guildOrder) do
         local basesInGuild = guildBuckets[guildName]
         print(string.format("  Guild '%s' (%d base(s)):\n", guildName, #basesInGuild))
+
+        local guildWebhook = config.guild_webhooks[guildName]
+        local wantFields = config.discord_enabled and (adminWebhook or guildWebhook) ~= nil
+
         for baseIndex, base in ipairs(basesInGuild) do
-            LogBaseCamp(base, string.format("Base %d", baseIndex), guildName, discordFields)
+            local fields = LogBaseCamp(base, string.format("Base %d", baseIndex), guildName, wantFields)
+            if fields then
+                for _, f in ipairs(fields) do
+                    if allFields then table.insert(allFields, f) end
+                    if guildWebhook then
+                        perGuildFields[guildName] = perGuildFields[guildName] or {}
+                        table.insert(perGuildFields[guildName], f)
+                    end
+                end
+            end
         end
     end
 
-    if discordFields then
-        local embed = {
-            title = "📊 Palworld Base Report",
-            description = string.format("%d guild(s), %d base(s)", #guildOrder, #bases),
-            color = 0x57F287, -- Discord green
-            fields = discordFields,
-            footer = "BaseInventoryLogger",
-            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-        }
-        local ok, statusOrErr = Discord.SendEmbed(config.discord_webhook_url, embed)
-        if not ok then
-            print(string.format("[BaseInventoryLogger] Discord send failed: %s\n", tostring(statusOrErr)))
+    if config.discord_enabled then
+        if allFields then
+            SendGuildReport("📊 Palworld Base Report (All Guilds)", adminWebhook, allFields, #guildOrder, #bases)
+        end
+        for guildName, fields in pairs(perGuildFields) do
+            SendGuildReport("📊 " .. guildName .. " Base Report", config.guild_webhooks[guildName],
+                fields, 1, #fields > 0 and #guildBuckets[guildName] or 0)
         end
     end
 

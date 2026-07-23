@@ -1,5 +1,8 @@
 {
   "poll_interval_seconds": 10,
-  "discord_enabled": false,
-  "discord_webhook_url": ""
+  "discord_enabled": true,
+  "guild_webhooks": {
+    "all": "https://discord.com/api/webhooks/ADMIN_WEBHOOK_ID/ADMIN_WEBHOOK_TOKEN",
+    "YourGuildName": "https://discord.com/api/webhooks/GUILD_WEBHOOK_ID/GUILD_WEBHOOK_TOKEN"
+  }
 }
